@@ -1,7 +1,7 @@
 #Stats assignment 3 sh
 
 #Chromosome region:
-#2:135700000-136000000
+#2:135,700,000-136,000,000
 # This downloads ONLY the requested 300,000 base pairs from the IGSR server
 tabix -h http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/release/20190312_biallelic_SNV_and_INDEL/ALL.chr2.shapeit2_integrated_v1a.GRCh38.20181129.phased.vcf.gz 2:135700000-136000000 > lactose_region.vcf
 
