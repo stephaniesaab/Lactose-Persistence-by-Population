@@ -63,7 +63,7 @@ print(table(geno_data$Superpopulation)) #Africa, America, East Asia, Europe, Sou
 #Ensures HWE and MAF calcs are for specific analysis groups.
 
 geno_subset <- geno_data %>% 
-  filter(Superpopulation %in% c("EUR", "EAS", "SAS"))
+  filter(Superpopulation %in% c("AFR", "EUR", "EAS", "SAS"))
 
 #Separate genotype columns from the metadata columns
 metadata_cols <- c("SampleID", "FamilyID", "MotherID", "FatherID", "Sex", "Population", "Superpopulation")
@@ -225,7 +225,33 @@ ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulati
   theme_minimal() +
   theme(legend.position = "bottom")
 
-## 4. PCA Plot ====
+
+#PCA =====
+#Prepare numeric genotypes (Isolate only the SNP columns for calcs)
+
+#Normalization
+#Using scale. = TRUE in prcomp to standardize data
+#Scales each SNP to have unit variance (mean = 0, SD = 1)
+
+#Perform PCA
+pca_result <- prcomp(geno_matrix, center = TRUE, scale. = TRUE)
+#Summary results of PCA
+summary_pca <- summary(pca_result)
+
+#Variance explanation (Scree plot)
+pca_var <- pca_result$sdev^2
+var_explained <- pca_var / sum(pca_var)
+cumu_var <- cumsum(var_explained)
+
+#Figures for PCA: Scree plot
+plot(var_explained[1:10], type = "b",
+     main = "Figure 1: Scree Plot of LCT and MCM6 Region PCA",
+     xlab = "Principal Component",
+     ylab = "Proportion of Variance",
+     col = "blue", pch = 19)
+
+pca_df <- as.data.frame(pca_result$x)
+pca_df$Superpopulation <- geno_final$Superpopulation
 
 pca_var     <- pca_result$sdev^2
 pca_var_pct <- round(100 * pca_var / sum(pca_var), 1)
@@ -264,33 +290,6 @@ ggplot(scree_df, aes(x = PC, y = VariancePct)) +
   labs(title = "Scree Plot (pre-HWE filtering)", x = "Principal Component", y = "Variance Explained (%)") +
   scale_x_continuous(breaks = 1:20) +
   theme_minimal()
-
-#PCA =====
-#Prepare numeric genotypes (Isolate only the SNP columns for calcs)
-
-#Normalization
-#Using scale. = TRUE in prcomp to standardize data
-#Scales each SNP to have unit variance (mean = 0, SD = 1)
-
-#Perform PCA
-pca_result <- prcomp(geno_matrix, center = TRUE, scale. = TRUE)
-#Summary results of PCA
-summary_pca <- summary(pca_result)
-
-#Variance explanation (Scree plot)
-pca_var <- pca_result$sdev^2
-var_explained <- pca_var / sum(pca_var)
-cumu_var <- cumsum(var_explained)
-
-#Figures for PCA: Scree plot
-plot(var_explained[1:10], type = "b",
-     main = "Figure 1: Scree Plot of LCT and MCM6 Region PCA",
-     xlab = "Principal Component",
-     ylab = "Proportion of Variance",
-     col = "blue", pch = 19)
-
-pca_df <- as.data.frame(pca_result$x)
-pca_df$Superpopulation <- geno_final$Superpopulation
 
 #Identifying top SNPs ====
 #Goal is to identify lactose persistence across genetic groups so want to colour PCA by superpopulation
