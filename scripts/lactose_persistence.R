@@ -41,28 +41,109 @@ geno_df <- geno_df %>%
   filter(SampleID %in% metadata$SampleID)
 
 #Merge metadata with genotypes
-geno_data <- geno_df %>% 
+geno_final <- geno_df %>% 
   inner_join(metadata, by = c("SampleID" = "SampleID"))
-nrow(geno_data) #3202 (3202 samples in 30X 1000 Genomes project)
-ncol(geno_data) #6783 (6776 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
+nrow(geno_final) #3202 (3202 samples in 30X 1000 Genomes project)
+ncol(geno_final) #6783 (6776 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
 
 #Check populations
-print(table(geno_data$Population)) #Three letter codes for locations
-print(table(geno_data$Superpopulation)) #Africa, America, East Asia, Europe, South Asia
+print(table(geno_final$Population)) #Three letter codes for locations
+print(table(geno_final$Superpopulation)) #Africa, America, East Asia, Europe, South Asia
 
 
 #Write out CSV with variants and data
-#write.csv(geno_data, "../data/genotype_data.csv")
+#write.csv(geno_final, "../data/genotype_data.csv")
 
 # EDA ====
 #Exploratory data analysis to identify which subpopulations to extract before doing clustering by genotypes
+##1. QC ====
+# Population Sample Size Bar Chart
+pop_counts <- geno_final%>%
+  count(Superpopulation, Population)
 
-##1. Initial Subsetting and cleaning ====
+ggplot(pop_counts, aes(x = reorder(Population, -n), y = n, fill = Superpopulation)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Sample Size by Population",
+    x = "Population",
+    y = "Sample Count",
+    fill = "Superpopulation"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Population Counts by Superpopulation
+ggplot(pop_counts %>% group_by(Superpopulation) %>% summarise(n = sum(n)),
+       aes(x = reorder(Superpopulation, -n), y = n, fill = Superpopulation)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
+  labs(title = "Sample Size by Superpopulation", x = "Superpopulation", y = "Count") +
+  theme_minimal()
+
+## Per-Sample Heterozygosity
+het_rates <- rowMeans(geno_final == 1)
+het_df <- data.frame(
+  SampleID        = geno_final$SampleID,
+  Heterozygosity  = het_rates,
+  Superpopulation = geno_final$Superpopulation
+)
+
+het_mean <- mean(het_df$Heterozygosity)
+het_sd   <- sd(het_df$Heterozygosity)
+het_df$Outlier <- abs(het_df$Heterozygosity - het_mean) > 3 * het_sd
+
+cat("Heterozygosity outliers:", sum(het_df$Outlier), "\n")
+print(het_df[het_df$Outlier, ])
+
+ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulation)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(color = Outlier), width = 0.2, size = 0.8, alpha = 0.4) +
+  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
+  geom_hline(yintercept = c(het_mean - 3*het_sd, het_mean + 3*het_sd),
+             linetype = "dashed", color = "red", linewidth = 0.6) +
+  labs(
+    title = "Per-Sample Heterozygosity by Superpopulation",
+    subtitle = "Red dashed lines = mean ± 3 SD thresholds",
+    x = "Superpopulation",
+    y = "Heterozygosity Rate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+##2. Variant Density Across the Region ====
+snp_positions <- data.frame(
+  CHROM = getCHROM(vcf),
+  POS   = as.numeric(getPOS(vcf)),
+  ID    = getID(vcf)
+)
+
+#Define slice coordinates
+region_start <- 135700000
+region_end   <- 136100000
+
+#Filter the SNP positions to only include this slice
+snp_positions_slice <- snp_positions %>%
+  filter(POS >= region_start & POS <= region_end)
+
+# Plot the specific region
+ggplot(snp_positions_slice, aes(x = POS)) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  labs(
+    title = "Figure 3: Variant Density Across LCT/MCM6 Region",
+    subtitle = paste0("Genomic Slice: ", scales::comma(region_start), " - ", scales::comma(region_end), " bp"),
+    x = "Genomic Position (Chromosome 2)",
+    y = "Number of Variants"
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  theme_minimal()
+
+#Initial Subsetting and cleaning ====
 
 #Filter for target populations first (AFR, EUR, EAS, SAS).
 #Ensures HWE and MAF calcs are for specific analysis groups.
 
-geno_subset <- geno_data %>% 
+geno_subset <- geno_final %>% 
   filter(Superpopulation %in% c("AFR", "EUR", "EAS", "SAS"))
 
 #Separate genotype columns from the metadata columns
@@ -70,7 +151,7 @@ metadata_cols <- c("SampleID", "FamilyID", "MotherID", "FatherID", "Sex", "Popul
 all_snps <- setdiff(names(geno_subset), metadata_cols)
 length(all_snps) #= 6776 SNPs
 
-##2. SNP Filtering (MAF and informative) ====
+##1. SNP Filtering (MAF and informative) ====
 #Remove rare variants and monomorphic loci
 #Calculate the sum of alleles for each SNP
 # A sum of 0 means the variant (minor allele) is not present in the 3,202 samples
@@ -99,9 +180,9 @@ geno_matrix <- as.matrix(geno_final[, active_snps])
 rownames(geno_matrix) <- geno_final$SampleID
 head(geno_matrix[, 1:5])
 
-print(paste("Final SNPs for analysis:", length(active_snps))) # Should be 2556
+print(paste("Final SNPs for analysis:", length(active_snps)))
 
-##3. HWE filtering ====
+##2. HWE filtering ====
 # 1 = p^2 + 2pq + q^2
 #Identify SNPs that deviate from HWE within specific groups
 #Prevents technical errors from biasing PCA and Random forest
@@ -170,63 +251,7 @@ filter_hwe_by_pop <- function(df, pop_col = "Superpopulation", p_threshold = 0.0
 # snp_cols_filt <- genotypes_filt %>% 
 #   select(-all_of(hwe_fails))
 # ncol(snp_cols_filt) #2833
-
-##3. QC ====
-# Population Sample Size Bar Chart
-pop_counts <- geno_final%>%
-  count(Superpopulation, Population)
-
-ggplot(pop_counts, aes(x = reorder(Population, -n), y = n, fill = Superpopulation)) +
-  geom_bar(stat = "identity") +
-  labs(
-    title = "Sample Size by Population",
-    x = "Population",
-    y = "Sample Count",
-    fill = "Superpopulation"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# Population Counts by Superpopulation
-ggplot(pop_counts %>% group_by(Superpopulation) %>% summarise(n = sum(n)),
-       aes(x = reorder(Superpopulation, -n), y = n, fill = Superpopulation)) +
-  geom_bar(stat = "identity", show.legend = FALSE) +
-  geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
-  labs(title = "Sample Size by Superpopulation", x = "Superpopulation", y = "Count") +
-  theme_minimal()
-
-## Per-Sample Heterozygosity ====
-het_rates <- rowMeans(geno_final[, active_snps] == 1)
-het_df <- data.frame(
-  SampleID        = geno_subset$SampleID,
-  Heterozygosity  = het_rates,
-  Superpopulation = geno_subset$Superpopulation
-)
-
-het_mean <- mean(het_df$Heterozygosity)
-het_sd   <- sd(het_df$Heterozygosity)
-het_df$Outlier <- abs(het_df$Heterozygosity - het_mean) > 3 * het_sd
-
-cat("Heterozygosity outliers:", sum(het_df$Outlier), "\n")
-print(het_df[het_df$Outlier, ])
-
-ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulation)) +
-  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
-  geom_jitter(aes(color = Outlier), width = 0.2, size = 0.8, alpha = 0.4) +
-  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
-  geom_hline(yintercept = c(het_mean - 3*het_sd, het_mean + 3*het_sd),
-             linetype = "dashed", color = "red", linewidth = 0.6) +
-  labs(
-    title = "Per-Sample Heterozygosity by Superpopulation",
-    subtitle = "Red dashed lines = mean ± 3 SD thresholds",
-    x = "Superpopulation",
-    y = "Heterozygosity Rate"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-
-#PCA =====
+# PCA =====
 #Prepare numeric genotypes (Isolate only the SNP columns for calcs)
 
 #Normalization
@@ -235,6 +260,7 @@ ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulati
 
 #Perform PCA
 pca_result <- prcomp(geno_matrix, center = TRUE, scale. = TRUE)
+
 #Summary results of PCA
 summary_pca <- summary(pca_result)
 
@@ -291,7 +317,7 @@ ggplot(scree_df, aes(x = PC, y = VariancePct)) +
   scale_x_continuous(breaks = 1:20) +
   theme_minimal()
 
-#Identifying top SNPs ====
+## 1.Identifying top SNPs ====
 #Goal is to identify lactose persistence across genetic groups so want to colour PCA by superpopulation
 
 #PCA of lactose persistence region
@@ -304,7 +330,7 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
        y = paste0("PC2 (", round(var_explained[2]*100, 1), "%)"))
 
 
-#Identify top contributing SNPs (Loadings) ====
+## 1.Identify top contributing SNPs (Loadings) ====
 snp_loadings <- data.frame(
   SNP = rownames(pca_result$rotation),
   PC1_loading = abs(pca_result$rotation[,1])
@@ -317,35 +343,32 @@ top_snps <- snp_loadings %>%
 print(top_snps)
 
 
-# 5. Variant Density Across the Region ====
-#Define slice coordinates
-region_start <- 135700000
-region_end   <- 136100000
-
-#Filter the SNP positions to only include this slice
-snp_positions_slice <- snp_positions_filt %>%
-  filter(POS >= region_start & POS <= region_end)
-
-# Plot the specific region
-ggplot(snp_positions_slice, aes(x = POS)) +
-  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
-  labs(
-    title = "Figure 3: Variant Density Across LCT/MCM6 Region",
-    subtitle = paste0("Genomic Slice: ", scales::comma(region_start), " - ", scales::comma(region_end), " bp"),
-    x = "Genomic Position (Chromosome 2)",
-    y = "Number of Variants"
-  ) +
-  scale_x_continuous(labels = scales::comma) +
-  theme_minimal()
 
 #K-means ====
+set.seed(1516)
+
+# Take only the first 5 PCs to capture the main signal
+pca_for_km <- pca_result$x[, 1:5]
 
 #Get optimal clusters
+
+# Calculate WSS for K=1 to K=10
 #Expected 3 or 5 based on Superpopulations (AFR, EUR, EAS, SAS)
-set.seed(1516)
+wss <- sapply(1:10, function(k){
+  kmeans(pca_for_km, centers = k, nstart = 20, iter.max = 100)$tot.withinss
+})
+
+# The Elbow Plot
+elbow_df <- data.frame(K = 1:10, WSS = wss)
+ggplot(elbow_df, aes(x = K, y = WSS)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Figure 5: Elbow Method for Optimal K",
+       x = "Number of Clusters (K)", y = "Total Within-Cluster SS") +
+  theme_minimal()
 #Run K-means only on the numeric SNP columns
 #Use active_snps to ensure we aren't sending 'SampleID' to the math function
-km_res <- kmeans(geno_matrix, centers = 3, nstart = 25)
+km_res <- kmeans(geno_matrix, centers = 6, nstart = 25)
 
 #Add cluster assignments for plotting
 geno_final$Cluster <- as.factor(km_res$cluster)
