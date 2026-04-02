@@ -8,6 +8,13 @@ library(tidyr)
 library(randomForest)
 library(pegas)
 
+#TODO =====
+# 1) Fix the EDA (take out outliers part, i dont think that makes sense for SNP data)
+# 2) Random forest model
+# 3) K means model
+# 4) Figures for PCA
+# 5) Figures for K means
+# 6) Figures for RF
 #Need to merge VCF (Variant call format) data with metadata, want to align sampleIDs
 
 #Read in VCF file ====
@@ -50,193 +57,51 @@ print(table(geno_data$Superpopulation)) #Africa, America, East Asia, Europe, Sou
 # EDA ====
 #Exploratory data analysis to identify which subpopulations to extract before doing clustering by genotypes
 
+##1. Initial Subsetting and cleaning ====
+
+#Filter for target populations first (AFR, EUR, EAS, SAS).
+#Ensures HWE and MAF calcs are for specific analysis groups.
+
+geno_subset <- geno_data %>% 
+  filter(Superpopulation %in% c("EUR", "EAS", "SAS"))
+
 #Separate genotype columns from the metadata columns
-genotype_columns <- geno_data %>% #ncol = 6776 variants
-  select(-SampleID, -FamilyID, -FatherID, -MotherID, -Sex, -Population, -Superpopulation)
+metadata_cols <- c("SampleID", "FamilyID", "MotherID", "FatherID", "Sex", "Population", "Superpopulation")
+all_snps <- setdiff(names(geno_subset), metadata_cols)
+length(all_snps) #= 6776 SNPs
 
-#How many values are missing:
-missing_snps <- is.na(genotype_columns)
-sum(missing_snps) #0 so no missing values
-
+##2. SNP Filtering (MAF and informative) ====
+#Remove rare variants and monomorphic loci
 #Calculate the sum of alleles for each SNP
 # A sum of 0 means the variant (minor allele) is not present in the 3,202 samples
-snp_sums <- colSums(genotype_columns, na.rm = TRUE)
+mat_temp <- as.matrix(geno_subset[, all_snps])
+snp_sums <- colSums(mat_temp)
+n_samples <- nrow(geno_subset) #2712
+snp_sds <- apply(mat_temp, 2, sd, na.rm = TRUE)
 
-#Identify SNPs with at least one variant (sum > 0)
+#How many values are missing:
+any(is.na(mat_temp)) #FALSE so no missing values
+
 #Remove SNPs where everyone has the variant (sum == 2 * number of samples (3202))
 #Remove SNPs that are rare in the population (<0.001)
-keep_snps <- snp_sums > 0 & snp_sums < 2*nrow(geno_data) & snp_sums > 0.001*nrow(geno_data)
+keep_snps <-  snp_sums < (2*n_samples*(1- 0.001)) &
+  snp_sums > (0.001*n_samples) &
+  snp_sds > 0
+active_snps <- names(which(keep_snps))
+keep_snps[is.na(keep_snps)] <- FALSE
 
 #Subset data to keep only informative SNPs
-geno_data_filt <- geno_data[, c(names(which(keep_snps)), "SampleID", "Population", "Superpopulation", "Sex")]
-genotypes_filt <- genotype_columns[, names(which(keep_snps))]
+geno_final <- geno_subset[, 
+                          c("SampleID", "Sex", "Population", "Superpopulation",
+                            active_snps)]
+length(active_snps) #2516
+geno_matrix <- as.matrix(geno_final[, active_snps])
+rownames(geno_matrix) <- geno_final$SampleID
+head(geno_matrix[, 1:5])
 
-# ***************** EDA added by Maryanne********************************
-#Making the SNP columns available
-snp_cols <- geno_data_filt %>%
-  select(-SampleID, -Sex, -Population, -Superpopulation) %>%
-  names()
+print(paste("Final SNPs for analysis:", length(active_snps))) # Should be 2556
 
-geno_matrix <- geno_data_filt %>%
-  select(all_of(snp_cols)) %>%
-  as.matrix()
-rm(geno_matrix)
-
-# 1. Population Sample Size Bar Chart ====
-pop_counts <- geno_data_filt %>%
-  count(Superpopulation, Population)
-
-ggplot(pop_counts, aes(x = reorder(Population, -n), y = n, fill = Superpopulation)) +
-  geom_bar(stat = "identity") +
-  labs(
-    title = "Sample Size by Population",
-    x = "Population",
-    y = "Sample Count",
-    fill = "Superpopulation"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-#Population Counts by Superpopulation
-ggplot(pop_counts %>% group_by(Superpopulation) %>% summarise(n = sum(n)),
-       aes(x = reorder(Superpopulation, -n), y = n, fill = Superpopulation)) +
-  geom_bar(stat = "identity", show.legend = FALSE) +
-  geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
-  labs(title = "Sample Size by Superpopulation", x = "Superpopulation", y = "Count") +
-  theme_minimal()
-
-# 2. Minor Allele Frequency (MAF) Distribution ====
-maf_values <- sapply(snp_cols, function(snp) {
-  allele_freq <- mean(geno_data_filt[[snp]], na.rm = TRUE) / 2
-  return(min(allele_freq, 1 - allele_freq))
-})
-
-maf_df <- data.frame(SNP = names(maf_values), MAF = maf_values)
-
-ggplot(maf_df, aes(x = MAF)) +
-  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
-  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red", linewidth = 0.8) +
-  annotate("text", x = 0.07, y = Inf, label = "MAF = 0.05", vjust = 2, color = "red", size = 3.5) +
-  labs(
-    title = "Minor Allele Frequency Distribution",
-    subtitle = paste0("n = ", nrow(maf_df), " SNPs after MAF filtering, before HWE filtering"),
-    x = "Minor Allele Frequency",
-    y = "Number of SNPs"
-  ) +
-  theme_minimal()
-
-## 3. Per-Sample Heterozygosity ====
-het_rates <- apply(geno_matrix, 1, function(x) {
-  sum(x == 1, na.rm = TRUE) / sum(!is.na(x))
-})
-
-het_df <- data.frame(
-  SampleID        = geno_data_filt$SampleID,
-  Heterozygosity  = het_rates,
-  Superpopulation = geno_data_filt$Superpopulation
-)
-
-het_mean <- mean(het_df$Heterozygosity)
-het_sd   <- sd(het_df$Heterozygosity)
-het_df$Outlier <- abs(het_df$Heterozygosity - het_mean) > 3 * het_sd
-
-cat("Heterozygosity outliers:", sum(het_df$Outlier), "\n")
-print(het_df[het_df$Outlier, ])
-
-ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulation)) +
-  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
-  geom_jitter(aes(color = Outlier), width = 0.2, size = 0.8, alpha = 0.4) +
-  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
-  geom_hline(yintercept = c(het_mean - 3*het_sd, het_mean + 3*het_sd),
-             linetype = "dashed", color = "red", linewidth = 0.6) +
-  labs(
-    title = "Per-Sample Heterozygosity by Superpopulation",
-    subtitle = "Red dashed lines = mean ± 3 SD thresholds",
-    x = "Superpopulation",
-    y = "Heterozygosity Rate"
-  ) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-# 4. PCA Plot ====
-# Impute any NAs with column means before running PCA
-geno_matrix_imputed <- apply(geno_matrix, 2, function(col) {
-  col[is.na(col)] <- mean(col, na.rm = TRUE)
-  col
-})
-
-pca_result <- prcomp(geno_matrix_imputed, center = TRUE, scale. = FALSE)
-
-pca_var     <- pca_result$sdev^2
-pca_var_pct <- round(100 * pca_var / sum(pca_var), 1)
-
-pca_df <- data.frame(
-  PC1             = pca_result$x[, 1],
-  PC2             = pca_result$x[, 2],
-  PC3             = pca_result$x[, 3],
-  Superpopulation = geno_data_filt$Superpopulation,
-  Population      = geno_data_filt$Population
-)
-
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
-  geom_point(alpha = 0.6, size = 1.5) +
-  labs(
-    title = "PCA of Genotype Data (pre-HWE filtering)",
-    subtitle = "Colored by Superpopulation",
-    x = paste0("PC1 (", pca_var_pct[1], "% variance)"),
-    y = paste0("PC2 (", pca_var_pct[2], "% variance)")
-  ) +
-  theme_minimal()
-
-ggplot(pca_df, aes(x = PC1, y = PC3, color = Superpopulation)) +
-  geom_point(alpha = 0.6, size = 1.5) +
-  labs(
-    title = "PCA: PC1 vs PC3 (pre-HWE filtering)",
-    x = paste0("PC1 (", pca_var_pct[1], "% variance)"),
-    y = paste0("PC3 (", pca_var_pct[3], "% variance)")
-  ) +
-  theme_minimal()
-
-scree_df <- data.frame(PC = 1:20, VariancePct = pca_var_pct[1:20])
-ggplot(scree_df, aes(x = PC, y = VariancePct)) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Scree Plot (pre-HWE filtering)", x = "Principal Component", y = "Variance Explained (%)") +
-  scale_x_continuous(breaks = 1:20) +
-  theme_minimal()
-# 5. Variant Density Across the Region ====
-snp_positions <- data.frame(
-  CHROM = getCHROM(vcf),
-  POS   = as.numeric(getPOS(vcf)),
-  ID    = getID(vcf)
-)
-
-snp_positions_filt <- snp_positions %>%
-  filter(ID %in% snp_cols)
-
-ggplot(snp_positions_filt, aes(x = POS)) +
-  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
-  labs(
-    title = "Variant Density Across the Lactose Persistence Locus",
-    subtitle = "After MAF filtering, before HWE filtering",
-    x = "Genomic Position (bp)",
-    y = "Number of Variants"
-  ) +
-  scale_x_continuous(labels = scales::comma) +
-  theme_minimal()
-
-if (length(unique(snp_positions_filt$CHROM)) > 1) {
-  ggplot(snp_positions_filt, aes(x = POS)) +
-    geom_histogram(bins = 60, fill = "steelblue", color = "white") +
-    facet_wrap(~CHROM, scales = "free_x") +
-    labs(title = "Variant Density by Chromosome", x = "Position", y = "Variants") +
-    scale_x_continuous(labels = scales::comma) +
-    theme_minimal()
-}
-# **********************************************
-#Filter for geographic locations that will likely show differences in lactose persistence based on literature review
-
-# HWE Filtering Function by Superpopulation ====
+##3. HWE filtering ====
 # 1 = p^2 + 2pq + q^2
 #Identify SNPs that deviate from HWE within specific groups
 #Prevents technical errors from biasing PCA and Random forest
@@ -295,49 +160,113 @@ filter_hwe_by_pop <- function(df, pop_col = "Superpopulation", p_threshold = 0.0
   return(unique(snps_to_rm))
 }
 
-#Identify SNPs that fail HWE
-hwe_fails <- filter_hwe_by_pop(geno_data_filt, pop_col = "Superpopulation")
-length(hwe_fails) #Remove 679 SNPs
+# Identify SNPs that fail HWE
+# hwe_fails <- filter_hwe_by_pop(geno_data_filt, pop_col = "Superpopulation")
+# length(hwe_fails) #Remove 679 SNPs
 
-#Remove the SNPs
-geno_data_filt <- geno_data_filt %>% 
-  select(-all_of(hwe_fails))
+# #Remove the SNPs
+# geno_subset_filt <- geno_data_filt %>% 
+#   select(-all_of(hwe_fails))
+# snp_cols_filt <- genotypes_filt %>% 
+#   select(-all_of(hwe_fails))
+# ncol(snp_cols_filt) #2833
 
-# Check how many SNPs are left
-print(paste("Original SNPs:", ncol(genotype_columns)))
-print(paste("Informative SNPs remaining:", ncol(geno_data_filt %>% select(-SampleID, -Sex, -Population, -Superpopulation))))
+##3. QC ====
+# Population Sample Size Bar Chart
+pop_counts <- geno_final%>%
+  count(Superpopulation, Population)
 
-#Filter for geographic locations that will likely show differences in lactose persistence based on literature review
-geno_matrix_small <- geno_data_filt %>% 
-  filter(Superpopulation %in% c("AFR", "EUR", "EAS")) %>% 
-  select(-SampleID, -Sex, -Population, -Superpopulation)
+ggplot(pop_counts, aes(x = reorder(Population, -n), y = n, fill = Superpopulation)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Sample Size by Population",
+    x = "Population",
+    y = "Sample Count",
+    fill = "Superpopulation"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-#Labels for metadata
-labels_small <- geno_data_filt %>% 
-  filter(Superpopulation %in% c("AFR", "EUR", "EAS")) %>% 
-  select(SampleID, Sex, Population, Superpopulation)
+# Population Counts by Superpopulation
+ggplot(pop_counts %>% group_by(Superpopulation) %>% summarise(n = sum(n)),
+       aes(x = reorder(Superpopulation, -n), y = n, fill = Superpopulation)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.5, size = 3.5) +
+  labs(title = "Sample Size by Superpopulation", x = "Superpopulation", y = "Count") +
+  theme_minimal()
 
-#Calculate the sum of alleles for each SNP
-# A sum of 0 means the variant (minor allele) is not present in the 3,202 samples
-snp_sums2 <- colSums(geno_matrix_small, na.rm = TRUE)
+## Per-Sample Heterozygosity ====
+het_rates <- rowMeans(geno_final[, active_snps] == 1)
+het_df <- data.frame(
+  SampleID        = geno_subset$SampleID,
+  Heterozygosity  = het_rates,
+  Superpopulation = geno_subset$Superpopulation
+)
 
-#Identify SNPs with at least one variant (sum > 0)
-#Remove SNPs where everyone has the variant (sum == 2 * number of samples (3202))
-#Remove SNPs that are rare in the population (<0.001)
-keep_snps2 <- snp_sums2 > 0 & snp_sums2 < 2*nrow(geno_matrix_small) & snp_sums2 > 0.001*nrow(geno_matrix_small)
+het_mean <- mean(het_df$Heterozygosity)
+het_sd   <- sd(het_df$Heterozygosity)
+het_df$Outlier <- abs(het_df$Heterozygosity - het_mean) > 3 * het_sd
 
-#Subset data to keep only informative SNPs
-genotypes_small_filt <- geno_matrix_small[, names(which(keep_snps2))]
-print(paste("Informative SNPs remaining:", ncol(genotypes_small_filt))) #2086
+cat("Heterozygosity outliers:", sum(het_df$Outlier), "\n")
+print(het_df[het_df$Outlier, ])
 
-#Check Missing values
-sum(is.na(genotypes_small_filt)) #0
+ggplot(het_df, aes(x = Superpopulation, y = Heterozygosity, fill = Superpopulation)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(aes(color = Outlier), width = 0.2, size = 0.8, alpha = 0.4) +
+  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
+  geom_hline(yintercept = c(het_mean - 3*het_sd, het_mean + 3*het_sd),
+             linetype = "dashed", color = "red", linewidth = 0.6) +
+  labs(
+    title = "Per-Sample Heterozygosity by Superpopulation",
+    subtitle = "Red dashed lines = mean ± 3 SD thresholds",
+    x = "Superpopulation",
+    y = "Heterozygosity Rate"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
 
-rownames(genotypes_small_filt) <- labels_small$SampleID
+## 4. PCA Plot ====
+
+pca_var     <- pca_result$sdev^2
+pca_var_pct <- round(100 * pca_var / sum(pca_var), 1)
+
+pca_df <- data.frame(
+  PC1             = pca_result$x[, 1],
+  PC2             = pca_result$x[, 2],
+  PC3             = pca_result$x[, 3],
+  Superpopulation = geno_final$Superpopulation,
+  Population      = geno_final$Population
+)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  labs(
+    title = "PCA of Genotype Data (pre-HWE filtering)",
+    subtitle = "Colored by Superpopulation",
+    x = paste0("PC1 (", pca_var_pct[1], "% variance)"),
+    y = paste0("PC2 (", pca_var_pct[2], "% variance)")
+  ) +
+  theme_minimal()
+
+ggplot(pca_df, aes(x = PC1, y = PC3, color = Superpopulation)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  labs(
+    title = "PCA: PC1 vs PC3 (pre-HWE filtering)",
+    x = paste0("PC1 (", pca_var_pct[1], "% variance)"),
+    y = paste0("PC3 (", pca_var_pct[3], "% variance)")
+  ) +
+  theme_minimal()
+
+scree_df <- data.frame(PC = 1:20, VariancePct = pca_var_pct[1:20])
+ggplot(scree_df, aes(x = PC, y = VariancePct)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Scree Plot (pre-HWE filtering)", x = "Principal Component", y = "Variance Explained (%)") +
+  scale_x_continuous(breaks = 1:20) +
+  theme_minimal()
+
 #PCA =====
 #Prepare numeric genotypes (Isolate only the SNP columns for calcs)
-geno_matrix <- genotypes_small_filt %>% 
-  as.matrix()
 
 #Normalization
 #Using scale. = TRUE in prcomp to standardize data
@@ -361,7 +290,7 @@ plot(var_explained[1:10], type = "b",
      col = "blue", pch = 19)
 
 pca_df <- as.data.frame(pca_result$x)
-pca_df$Superpopulation <- labels_small$Superpopulation
+pca_df$Superpopulation <- geno_final$Superpopulation
 
 #Identifying top SNPs ====
 #Goal is to identify lactose persistence across genetic groups so want to colour PCA by superpopulation
@@ -376,5 +305,52 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
        y = paste0("PC2 (", round(var_explained[2]*100, 1), "%)"))
 
 
-#Identify top contributing SNPs (Loadings)
-snp_loadings <- data.frame()
+#Identify top contributing SNPs (Loadings) ====
+snp_loadings <- data.frame(
+  SNP = rownames(pca_result$rotation),
+  PC1_loading = abs(pca_result$rotation[,1])
+)
+
+top_snps <- snp_loadings %>% 
+  arrange(desc(PC1_loading)) %>% 
+  head(10)
+#Get top 10 SNPs
+print(top_snps)
+
+
+# 5. Variant Density Across the Region ====
+#Define slice coordinates
+region_start <- 135700000
+region_end   <- 136100000
+
+#Filter the SNP positions to only include this slice
+snp_positions_slice <- snp_positions_filt %>%
+  filter(POS >= region_start & POS <= region_end)
+
+# Plot the specific region
+ggplot(snp_positions_slice, aes(x = POS)) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  labs(
+    title = "Figure 3: Variant Density Across LCT/MCM6 Region",
+    subtitle = paste0("Genomic Slice: ", scales::comma(region_start), " - ", scales::comma(region_end), " bp"),
+    x = "Genomic Position (Chromosome 2)",
+    y = "Number of Variants"
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  theme_minimal()
+
+#K-means ====
+
+#Get optimal clusters
+#Expected 3 or 5 based on Superpopulations (AFR, EUR, EAS, SAS)
+set.seed(1516)
+#Run K-means only on the numeric SNP columns
+#Use active_snps to ensure we aren't sending 'SampleID' to the math function
+km_res <- kmeans(geno_matrix, centers = 3, nstart = 25)
+
+#Add cluster assignments for plotting
+geno_final$Cluster <- as.factor(km_res$cluster)
+
+#Check results against the actual populations
+table(geno_final$Superpopulation, geno_final$Cluster)
+
