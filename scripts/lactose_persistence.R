@@ -7,6 +7,8 @@ library(ggplot2)
 library(tidyr)
 library(randomForest)
 library(pegas)
+library(caret)
+library(RColorBrewer)
 
 #TODO =====
 # 1) Fix the EDA (take out outliers part, i dont think that makes sense for SNP data)
@@ -144,7 +146,7 @@ ggplot(snp_positions_slice, aes(x = POS)) +
 #Ensures HWE and MAF calcs are for specific analysis groups.
 
 geno_subset <- geno_final %>% 
-  filter(Superpopulation %in% c("AFR", "EUR", "EAS", "SAS"))
+  filter(Superpopulation %in% c("AFR", "EUR", "EAS"))
 
 #Separate genotype columns from the metadata columns
 metadata_cols <- c("SampleID", "FamilyID", "MotherID", "FatherID", "Sex", "Population", "Superpopulation")
@@ -347,13 +349,13 @@ print(top_snps)
 #K-means ====
 set.seed(1516)
 
-# Take only the first 5 PCs to capture the main signal
-pca_for_km <- pca_result$x[, 1:5]
+# Take only the first 10 PCs to capture the main signal
+pca_for_km <- pca_result$x[, 1:10]
 
 #Get optimal clusters
 
 # Calculate WSS for K=1 to K=10
-#Expected 3 or 5 based on Superpopulations (AFR, EUR, EAS, SAS)
+#Expected 3 or 5 based on Superpopulations (AFR, EUR, EAS)
 wss <- sapply(1:10, function(k){
   kmeans(pca_for_km, centers = k, nstart = 20, iter.max = 100)$tot.withinss
 })
@@ -366,8 +368,8 @@ ggplot(elbow_df, aes(x = K, y = WSS)) +
   labs(title = "Figure 5: Elbow Method for Optimal K",
        x = "Number of Clusters (K)", y = "Total Within-Cluster SS") +
   theme_minimal()
-#Run K-means only on the numeric SNP columns
-#Use active_snps to ensure we aren't sending 'SampleID' to the math function
+
+#Run kmeans on SNP columns, 6 clusters based on elbow plot
 km_res <- kmeans(geno_matrix, centers = 6, nstart = 25)
 
 #Add cluster assignments for plotting
@@ -376,3 +378,191 @@ geno_final$Cluster <- as.factor(km_res$cluster)
 #Check results against the actual populations
 table(geno_final$Superpopulation, geno_final$Cluster)
 
+#RF ====
+
+# SNP column names like "2:135700020:A:G" contain colons and start with a number,
+# which breaks R's formula interface. Rename to SNP_1, SNP_2, etc. and store
+# the originals so we can restore them on the importance plots
+superpop <- geno_final$Superpopulation
+superpop_levels  <- sort(unique(superpop))
+superpop_colours <- setNames(
+  brewer.pal(n = length(superpop_levels), name = "Set1"),
+  superpop_levels
+)
+
+original_snp_names <- colnames(geno_matrix)
+safe_snp_names     <- paste0("SNP_", seq_along(original_snp_names))
+colnames(geno_matrix) <- safe_snp_names
+snp_name_lookup <- setNames(original_snp_names, safe_snp_names)
+snp_cols <- safe_snp_names
+
+rf_df <- as.data.frame(geno_matrix)
+rf_df$Superpopulation <- as.factor(superpop)
+
+set.seed(123)
+train_idx <- createDataPartition(
+  rf_df$Superpopulation,
+  p    = 0.8,
+  list = FALSE
+)
+
+train_df <- rf_df[train_idx,  ]
+test_df  <- rf_df[-train_idx, ]
+
+print(table(train_df$Superpopulation))
+print(table(test_df$Superpopulation))
+
+set.seed(42)
+rf_model <- randomForest(
+  Superpopulation ~ .,   
+  data       = train_df,
+  ntree      = 500,
+  importance = TRUE,
+  do.trace   = 100
+)
+
+print(rf_model)
+
+oob_df <- data.frame(
+  Trees = seq_len(nrow(rf_model$err.rate)),
+  OOB   = rf_model$err.rate[, "OOB"],
+  AFR   = rf_model$err.rate[, "AFR"],
+  EAS   = rf_model$err.rate[, "EAS"],
+  EUR   = rf_model$err.rate[, "EUR"]
+)
+oob_long <- tidyr::pivot_longer(
+  oob_df,
+  cols      = -Trees,
+  names_to  = "Class",
+  values_to = "ErrorRate"
+)
+
+ggplot(oob_long, aes(x = Trees, y = ErrorRate, colour = Class)) +
+  geom_line(linewidth = 0.8) +
+  scale_colour_manual(
+    values = c("OOB" = "black", superpop_colours)
+  ) +
+  labs(
+    title    = "Figure 8: Random Forest OOB Error vs. Number of Trees",
+    subtitle = "Overall OOB error (black) + per-class error rates",
+    x        = "Number of Trees",
+    y        = "OOB Error Rate",
+    colour   = "Class"
+  ) +
+  theme_classic(base_size = 13)
+
+ggsave("fig8_oob_error.png", width = 7, height = 4.5, dpi = 300)
+
+#tuning with mtry 
+cat("\nTuning mtry...\n")
+set.seed(42)
+tuned_mtry <- tuneRF(
+  x          = train_df[, snp_cols],
+  y          = train_df$Superpopulation,
+  ntreeTry   = 300,
+  stepFactor = 2,
+  improve    = 0.01,
+  trace      = TRUE,
+  plot       = TRUE
+)
+
+best_mtry <- tuned_mtry[which.min(tuned_mtry[, 2]), 1]
+cat("Best mtry:", best_mtry, "\n")
+
+#tunes RF 
+cat("\nTraining final Random Forest (tuned mtry =", best_mtry, ")...\n")
+set.seed(42)
+rf_final <- randomForest(
+  Superpopulation ~ .,
+  data       = train_df,
+  ntree      = 500,
+  mtry       = best_mtry,
+  importance = TRUE
+)
+print(rf_final)
+
+#model eval
+test_preds <- predict(rf_final, newdata = test_df[, snp_cols])
+
+conf_mat <- confusionMatrix(test_preds, test_df$Superpopulation)
+print(conf_mat)
+
+overall_acc   <- round(conf_mat$overall["Accuracy"] * 100, 2)
+overall_kappa <- round(conf_mat$overall["Kappa"], 4)
+
+cat("\n=== FINAL TEST SET PERFORMANCE ===\n")
+cat("Overall Accuracy:", overall_acc, "%\n")
+cat("Cohen's Kappa:   ", overall_kappa, "\n")
+cat("(Kappa > 0.8 = excellent; > 0.6 = good; < 0.4 = poor)\n\n")
+
+per_class <- as.data.frame(conf_mat$byClass)[,
+                                             c("Sensitivity", "Specificity", "Precision", "F1")]
+print(round(per_class, 4))
+
+#conf matrix heatmap 
+conf_table        <- as.data.frame(conf_mat$table)
+names(conf_table) <- c("Predicted", "Reference", "Freq")
+
+ggplot(conf_table, aes(x = Reference, y = Predicted, fill = Freq)) +
+  geom_tile(colour = "white", linewidth = 0.5) +
+  geom_text(aes(label = Freq), size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(
+    title    = "Figure 9: Confusion Matrix — Random Forest (Test Set)",
+    subtitle = paste0("Overall Accuracy: ", overall_acc,
+                      "%  |  Cohen's Kappa: ", overall_kappa),
+    x        = "True Superpopulation",
+    y        = "Predicted Superpopulation",
+    fill     = "Count"
+  ) +
+  theme_classic(base_size = 14)
+
+ggsave("fig9_confusion_matrix.png", width = 6, height = 5, dpi = 300)
+
+#most important SNPs (MDA and MDG (gini)
+importance_df     <- as.data.frame(importance(rf_final))
+importance_df$SNP <- rownames(importance_df)
+
+# Restore original SNP names for axis labels
+importance_df$SNP_label <- snp_name_lookup[importance_df$SNP]
+
+#top 20 by MDA (mean decrease accuracy)
+top20_mda <- importance_df %>%
+  arrange(desc(MeanDecreaseAccuracy)) %>%
+  head(20)
+
+ggplot(top20_mda, aes(x = reorder(SNP_label, MeanDecreaseAccuracy),
+                      y = MeanDecreaseAccuracy)) +
+  geom_col(fill = "darkorange", alpha = 0.85) +
+  coord_flip() +
+  labs(
+    title    = "Figure 10: Top 20 SNPs — Mean Decrease in Accuracy",
+    subtitle = "Higher value = more important for classification",
+    x        = "SNP",
+    y        = "Mean Decrease in Accuracy"
+  ) +
+  theme_classic(base_size = 12)
+
+ggsave("fig10_importance_MDA.png", width = 7, height = 6, dpi = 300)
+
+#top 20 by MDG (mean decrease gini)
+top20_mdg <- importance_df %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  head(20)
+
+ggplot(top20_mdg, aes(x = reorder(SNP_label, MeanDecreaseGini),
+                      y = MeanDecreaseGini)) +
+  geom_col(fill = "mediumpurple", alpha = 0.85) +
+  coord_flip() +
+  labs(
+    title    = "Figure 11: Top 20 SNPs — Mean Decrease in Gini Impurity",
+    subtitle = "Higher value = more splits in all trees relied on this SNP",
+    x        = "SNP",
+    y        = "Mean Decrease in Gini"
+  ) +
+  theme_classic(base_size = 12)
+
+ggsave("fig11_importance_Gini.png", width = 7, height = 6, dpi = 300)
+
+#top 10 SNPs by MDA
+print(top20_mda[1:10, c("SNP_label", "MeanDecreaseAccuracy", "MeanDecreaseGini")])
