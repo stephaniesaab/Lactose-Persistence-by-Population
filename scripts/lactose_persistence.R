@@ -9,19 +9,16 @@ library(randomForest)
 library(pegas)
 library(caret)
 library(RColorBrewer)
+library(plotly)
+library(factoextra)
 
-#TODO =====
-# 1) Fix the EDA (take out outliers part, i dont think that makes sense for SNP data)
-# 2) Random forest model
-# 3) K means model
-# 4) Figures for PCA
-# 5) Figures for K means
-# 6) Figures for RF
-#Need to merge VCF (Variant call format) data with metadata, want to align sampleIDs
 
 #Read in VCF file ====
-#Should output processed variant: 6776
-vcf <- read.vcfR("../data/lactose_persistence.vcf", verbose = TRUE)
+
+
+#Need to merge VCF (Variant call format) data with metadata, want to align sampleIDs
+#Should output processed variant: ~26319
+vcf <- read.vcfR("../data/lactose_persistence_slice_large.vcf", verbose = TRUE)
 
 #Read metadata
 metadata <- read.table("../data/20130606_g1k_3202_samples_ped_population.txt", header = TRUE, sep = " ") #Columns separated by spaces
@@ -30,11 +27,11 @@ names(metadata)
 #Extract genotypes and sample IDs
 #Extract genotype matrix (Converts genotypes into number of alternate alleles)
 genotypes <- extract.gt(vcf, element = "GT", as.numeric = TRUE)
-nrow(genotypes) #6776, each row is a variant
+nrow(genotypes) #26319, each row is a variant
 
 #Transpose so samples are rows and SNPs are columns
 genotypes_t <- t(genotypes)
-ncol(genotypes_t) #6776
+ncol(genotypes_t) #26319
 
 #Convert data to a dataframe to make sampleIDs a column
 geno_df <- as.data.frame(genotypes_t) #nrow  = 
@@ -46,7 +43,7 @@ geno_df <- geno_df %>%
 geno_final <- geno_df %>% 
   inner_join(metadata, by = c("SampleID" = "SampleID"))
 nrow(geno_final) #3202 (3202 samples in 30X 1000 Genomes project)
-ncol(geno_final) #6783 (6776 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
+ncol(geno_final) #26326 (26319 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
 
 #Check populations
 print(table(geno_final$Population)) #Three letter codes for locations
@@ -151,7 +148,7 @@ geno_subset <- geno_final %>%
 #Separate genotype columns from the metadata columns
 metadata_cols <- c("SampleID", "FamilyID", "MotherID", "FatherID", "Sex", "Population", "Superpopulation")
 all_snps <- setdiff(names(geno_subset), metadata_cols)
-length(all_snps) #= 6776 SNPs
+length(all_snps) #= 26319 SNPs
 
 ##1. SNP Filtering (MAF and informative) ====
 #Remove rare variants and monomorphic loci
@@ -159,7 +156,7 @@ length(all_snps) #= 6776 SNPs
 # A sum of 0 means the variant (minor allele) is not present in the 3,202 samples
 mat_temp <- as.matrix(geno_subset[, all_snps])
 snp_sums <- colSums(mat_temp)
-n_samples <- nrow(geno_subset) #2712
+n_samples <- nrow(geno_subset) #2111
 snp_sds <- apply(mat_temp, 2, sd, na.rm = TRUE)
 
 #How many values are missing:
@@ -177,7 +174,7 @@ keep_snps[is.na(keep_snps)] <- FALSE
 geno_final <- geno_subset[, 
                           c("SampleID", "Sex", "Population", "Superpopulation",
                             active_snps)]
-length(active_snps) #2516
+length(active_snps) #12877
 geno_matrix <- as.matrix(geno_final[, active_snps])
 rownames(geno_matrix) <- geno_final$SampleID
 head(geno_matrix[, 1:5])
@@ -326,7 +323,7 @@ ggplot(scree_df, aes(x = PC, y = VariancePct)) +
 ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
   geom_point(alpha = 0.7, size = 2) +
   theme_minimal()+
-  labs(title = "Figure 2: PCA of Lactose Persistence by Region",
+  labs(title = "PCA of Lactose Persistence by Region",
        subtitle = "Samples clustered by superpopulation",
        x = paste0("PC1 (", round(var_explained[1]*100, 1), "%)"),
        y = paste0("PC2 (", round(var_explained[2]*100, 1), "%)"))
@@ -349,8 +346,8 @@ print(top_snps)
 #K-means ====
 set.seed(1516)
 
-# Take only the first 10 PCs to capture the main signal
-pca_for_km <- pca_result$x[, 1:10]
+# Take only the first 11 PCs to capture the main signal
+pca_for_km <- pca_result$x[, 1:11]
 
 #Get optimal clusters
 
@@ -365,12 +362,17 @@ elbow_df <- data.frame(K = 1:10, WSS = wss)
 ggplot(elbow_df, aes(x = K, y = WSS)) +
   geom_line() + geom_point() +
   scale_x_continuous(breaks = 1:10) +
-  labs(title = "Figure 5: Elbow Method for Optimal K",
+  labs(title = "Elbow Method for Optimal K",
        x = "Number of Clusters (K)", y = "Total Within-Cluster SS") +
   theme_minimal()
 
-#Run kmeans on SNP columns, 6 clusters based on elbow plot
-km_res <- kmeans(geno_matrix, centers = 6, nstart = 25)
+#Elbow plot had no clear Bend, use silhouette method to get number of clusters to use
+fviz_nbclust(pca_for_km, kmeans, method = "silhouette") +
+  labs(title = "Optimal Number of Clusters (Silhouette Method)")
+#Indicated around 9 clusters, but showed average silhouette increased greatly around 6
+
+#Run kmeans on SNP columns, 6 clusters based on elbow plot and Silhouette
+km_res <- kmeans(pca_for_km, centers = 6, nstart = 25)
 
 #Add cluster assignments for plotting
 geno_final$Cluster <- as.factor(km_res$cluster)
