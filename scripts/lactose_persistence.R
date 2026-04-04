@@ -1,5 +1,19 @@
 #Assignment 3 for Statistics for Bioinformatics: Gene Classifications
 
+#BASH SCRIPT TO RUN IN TERMINAL ====
+#USE TABIX from htslib package
+
+
+# #Slice from URL:
+# #Slice the lactose region directly from the remote URL (This gave a file with 111 lines of comments)
+# tabix -h https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/1kGP_high_coverage_Illumina.chr2.filtered.SNV_INDEL_SV_phased_panel.vcf.gz chr2:135700000-136800000 > lactose_persistence_slice_large.vcf
+# 
+# #Check if there is data:
+# grep -v "^#" lactose_persistence_slice_large.vcf | wc -l #Success
+# 
+# #Metadata (population, sex)
+# wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/20130606_g1k_3202_samples_ped_population.txt
+
 #Load libraries ====
 library(vcfR)
 library(dplyr)
@@ -14,44 +28,47 @@ library(factoextra)
 
 
 #Read in VCF file ====
+# 
+# #Need to merge VCF (Variant call format) data with metadata, want to align sampleIDs
+# #Should output processed variant: ~26319, 3211 cols
+# vcf <- read.vcfR("../data/lactose_persistence_slice_large.vcf", verbose = TRUE)
+# 
+# #Read metadata
+# metadata <- read.table("../data/20130606_g1k_3202_samples_ped_population.txt", header = TRUE, sep = " ") #Columns separated by spaces
+# names(metadata)
+# 
+# #Extract genotypes and sample IDs
+# #Extract genotype matrix (Converts genotypes into number of alternate alleles)
+# genotypes <- extract.gt(vcf, element = "GT", as.numeric = TRUE)
+# nrow(genotypes) #26319, each row is a variant
+# 
+# #Transpose so samples are rows and SNPs are columns
+# genotypes_t <- t(genotypes)
+# ncol(genotypes_t) #26319
+# 
+# #Convert data to a dataframe to make sampleIDs a column
+# geno_df <- as.data.frame(genotypes_t) #nrow  = 
+# geno_df$SampleID <- rownames(geno_df)
+# geno_df <- geno_df %>%
+#   filter(SampleID %in% metadata$SampleID)
+# 
+# # #Merge metadata with genotypes
+# geno_final <- geno_df %>%
+#   inner_join(metadata, by = c("SampleID" = "SampleID"))
+# nrow(geno_final) #3202 (3202 samples in 30X 1000 Genomes project)
+# ncol(geno_final) #26326 (26319 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
 
+# #Check populations
+# print(head(table(geno_final$Population))) #Three letter codes for locations
+# print(head(table(geno_final$Superpopulation))) #Africa, America, East Asia, Europe, South Asia
+# 
+# 
+# #Write out CSV with variants and data
+# write.csv(geno_final, "../data/genotype_data.csv", row.names = FALSE)
 
-#Need to merge VCF (Variant call format) data with metadata, want to align sampleIDs
-#Should output processed variant: ~26319
-vcf <- read.vcfR("../data/lactose_persistence_slice_large.vcf", verbose = TRUE)
-
-#Read metadata
-metadata <- read.table("../data/20130606_g1k_3202_samples_ped_population.txt", header = TRUE, sep = " ") #Columns separated by spaces
-names(metadata)
-
-#Extract genotypes and sample IDs
-#Extract genotype matrix (Converts genotypes into number of alternate alleles)
-genotypes <- extract.gt(vcf, element = "GT", as.numeric = TRUE)
-nrow(genotypes) #26319, each row is a variant
-
-#Transpose so samples are rows and SNPs are columns
-genotypes_t <- t(genotypes)
-ncol(genotypes_t) #26319
-
-#Convert data to a dataframe to make sampleIDs a column
-geno_df <- as.data.frame(genotypes_t) #nrow  = 
-geno_df$SampleID <- rownames(geno_df)
-geno_df <- geno_df %>%
-  filter(SampleID %in% metadata$SampleID)
-
-#Merge metadata with genotypes
-geno_final <- geno_df %>% 
-  inner_join(metadata, by = c("SampleID" = "SampleID"))
-nrow(geno_final) #3202 (3202 samples in 30X 1000 Genomes project)
-ncol(geno_final) #26326 (26319 SampleIDs + SampleID + Sex + FamilyID + Population + Superpopulation + MotherID + FatherID )
-
-#Check populations
-print(table(geno_final$Population)) #Three letter codes for locations
-print(table(geno_final$Superpopulation)) #Africa, America, East Asia, Europe, South Asia
-
-
-#Write out CSV with variants and data
-#write.csv(geno_final, "../data/genotype_data.csv")
+#Previously downloaded and sliced the VCF. For convenience, 
+#Download the genotype CSV here: ====
+geno_final <- read.csv("../data/genotype_data.csv")
 
 # EDA ====
 #Exploratory data analysis to identify which subpopulations to extract before doing clustering by genotypes
@@ -119,7 +136,7 @@ snp_positions <- data.frame(
 
 #Define slice coordinates
 region_start <- 135700000
-region_end   <- 136100000
+region_end   <- 136800000
 
 #Filter the SNP positions to only include this slice
 snp_positions_slice <- snp_positions %>%
@@ -329,7 +346,7 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Superpopulation)) +
        y = paste0("PC2 (", round(var_explained[2]*100, 1), "%)"))
 
 
-## 1.Identify top contributing SNPs (Loadings) ====
+## Identify top contributing SNPs (Loadings) ====
 snp_loadings <- data.frame(
   SNP = rownames(pca_result$rotation),
   PC1_loading = abs(pca_result$rotation[,1])
@@ -340,8 +357,6 @@ top_snps <- snp_loadings %>%
   head(10)
 #Get top 10 SNPs
 print(top_snps)
-
-
 
 #K-means ====
 set.seed(1516)
@@ -385,6 +400,7 @@ table(geno_final$Superpopulation, geno_final$Cluster)
 # SNP column names like "2:135700020:A:G" contain colons and start with a number,
 # which breaks R's formula interface. Rename to SNP_1, SNP_2, etc. and store
 # the originals so we can restore them on the importance plots
+#Renaming SNPS
 superpop <- geno_final$Superpopulation
 superpop_levels  <- sort(unique(superpop))
 superpop_colours <- setNames(
@@ -398,6 +414,7 @@ colnames(geno_matrix) <- safe_snp_names
 snp_name_lookup <- setNames(original_snp_names, safe_snp_names)
 snp_cols <- safe_snp_names
 
+#Data particioning (80/20 train-test split)
 rf_df <- as.data.frame(geno_matrix)
 rf_df$Superpopulation <- as.factor(superpop)
 
@@ -411,9 +428,10 @@ train_idx <- createDataPartition(
 train_df <- rf_df[train_idx,  ]
 test_df  <- rf_df[-train_idx, ]
 
-print(table(train_df$Superpopulation))
-print(table(test_df$Superpopulation))
+print(head(table(train_df$Superpopulation)))
+print(head(table(test_df$Superpopulation)))
 
+#Initial model training: Assessing OOB Error
 set.seed(42)
 rf_model <- randomForest(
   Superpopulation ~ .,   
@@ -425,6 +443,7 @@ rf_model <- randomForest(
 
 print(rf_model)
 
+#Error rate visualization
 oob_df <- data.frame(
   Trees = seq_len(nrow(rf_model$err.rate)),
   OOB   = rf_model$err.rate[, "OOB"],
@@ -439,22 +458,22 @@ oob_long <- tidyr::pivot_longer(
   values_to = "ErrorRate"
 )
 
-ggplot(oob_long, aes(x = Trees, y = ErrorRate, colour = Class)) +
+p_oob <- ggplot(oob_long, aes(x = Trees, y = ErrorRate, colour = Class)) +
   geom_line(linewidth = 0.8) +
   scale_colour_manual(
     values = c("OOB" = "black", superpop_colours)
   ) +
   labs(
-    title    = "Figure 8: Random Forest OOB Error vs. Number of Trees",
+    title    = "Random Forest OOB Error vs. Number of Trees",
     subtitle = "Overall OOB error (black) + per-class error rates",
     x        = "Number of Trees",
     y        = "OOB Error Rate",
     colour   = "Class"
   ) +
   theme_classic(base_size = 13)
+ggsave(file.path("../figures", "fig8_oob_error.png"), plot = p_oob, width = 7, height = 4.5, dpi = 300)
 
-ggsave("fig8_oob_error.png", width = 7, height = 4.5, dpi = 300)
-
+#Hyperparameter tuning to find optimal mtry
 #tuning with mtry 
 cat("\nTuning mtry...\n")
 set.seed(42)
@@ -471,6 +490,7 @@ tuned_mtry <- tuneRF(
 best_mtry <- tuned_mtry[which.min(tuned_mtry[, 2]), 1]
 cat("Best mtry:", best_mtry, "\n")
 
+#Final model training using tuned parameters
 #tunes RF 
 cat("\nTraining final Random Forest (tuned mtry =", best_mtry, ")...\n")
 set.seed(42)
@@ -483,7 +503,7 @@ rf_final <- randomForest(
 )
 print(rf_final)
 
-#model eval
+#model evaluation: testing on unseen data
 test_preds <- predict(rf_final, newdata = test_df[, snp_cols])
 
 conf_mat <- confusionMatrix(test_preds, test_df$Superpopulation)
@@ -501,16 +521,16 @@ per_class <- as.data.frame(conf_mat$byClass)[,
                                              c("Sensitivity", "Specificity", "Precision", "F1")]
 print(round(per_class, 4))
 
-#conf matrix heatmap 
+#Evaluation Visualization (confusion matrix heatmap)
 conf_table        <- as.data.frame(conf_mat$table)
 names(conf_table) <- c("Predicted", "Reference", "Freq")
 
-ggplot(conf_table, aes(x = Reference, y = Predicted, fill = Freq)) +
+p_conf <- ggplot(conf_table, aes(x = Reference, y = Predicted, fill = Freq)) +
   geom_tile(colour = "white", linewidth = 0.5) +
   geom_text(aes(label = Freq), size = 6, fontface = "bold") +
   scale_fill_gradient(low = "white", high = "steelblue") +
   labs(
-    title    = "Figure 9: Confusion Matrix — Random Forest (Test Set)",
+    title    = "Confusion Matrix — Random Forest (Test Set)",
     subtitle = paste0("Overall Accuracy: ", overall_acc,
                       "%  |  Cohen's Kappa: ", overall_kappa),
     x        = "True Superpopulation",
@@ -519,52 +539,53 @@ ggplot(conf_table, aes(x = Reference, y = Predicted, fill = Freq)) +
   ) +
   theme_classic(base_size = 14)
 
-ggsave("fig9_confusion_matrix.png", width = 6, height = 5, dpi = 300)
+ggsave(file.path("../figures", "fig9_confusion_matrix.png"), plot = p_conf, width = 6, height = 5, dpi = 300)
 
-#most important SNPs (MDA and MDG (gini)
+#Identifying key ancestry markers: most important SNPs (MDA and MDG (gini)
 importance_df     <- as.data.frame(importance(rf_final))
 importance_df$SNP <- rownames(importance_df)
 
 # Restore original SNP names for axis labels
 importance_df$SNP_label <- snp_name_lookup[importance_df$SNP]
 
-#top 20 by MDA (mean decrease accuracy)
+#MDA plot: top 20 by mean decrease accuracy
 top20_mda <- importance_df %>%
   arrange(desc(MeanDecreaseAccuracy)) %>%
   head(20)
 
-ggplot(top20_mda, aes(x = reorder(SNP_label, MeanDecreaseAccuracy),
+p_mda <- ggplot(top20_mda, aes(x = reorder(SNP_label, MeanDecreaseAccuracy),
                       y = MeanDecreaseAccuracy)) +
   geom_col(fill = "darkorange", alpha = 0.85) +
   coord_flip() +
   labs(
-    title    = "Figure 10: Top 20 SNPs — Mean Decrease in Accuracy",
+    title    = "Top 20 SNPs — Mean Decrease in Accuracy",
     subtitle = "Higher value = more important for classification",
     x        = "SNP",
     y        = "Mean Decrease in Accuracy"
   ) +
   theme_classic(base_size = 12)
 
-ggsave("fig10_importance_MDA.png", width = 7, height = 6, dpi = 300)
+ggsave(file.path("../figures", "fig10_importance_MDA.png"), plot = p_mda, width = 7, height = 6, dpi = 300)
 
 #top 20 by MDG (mean decrease gini)
 top20_mdg <- importance_df %>%
   arrange(desc(MeanDecreaseGini)) %>%
   head(20)
 
-ggplot(top20_mdg, aes(x = reorder(SNP_label, MeanDecreaseGini),
+p_mdg <- ggplot(top20_mdg, aes(x = reorder(SNP_label, MeanDecreaseGini),
                       y = MeanDecreaseGini)) +
   geom_col(fill = "mediumpurple", alpha = 0.85) +
   coord_flip() +
   labs(
-    title    = "Figure 11: Top 20 SNPs — Mean Decrease in Gini Impurity",
+    title    = "Top 20 SNPs — Mean Decrease in Gini Impurity",
     subtitle = "Higher value = more splits in all trees relied on this SNP",
     x        = "SNP",
     y        = "Mean Decrease in Gini"
   ) +
   theme_classic(base_size = 12)
 
-ggsave("fig11_importance_Gini.png", width = 7, height = 6, dpi = 300)
+ggsave(file.path("../figures", "fig11_importance_Gini.png"), plot = p_mdg, width = 7, height = 6, dpi = 300)
 
 #top 10 SNPs by MDA
 print(top20_mda[1:10, c("SNP_label", "MeanDecreaseAccuracy", "MeanDecreaseGini")])
+cat("\nDone. All figures saved to ../figures/\n")
