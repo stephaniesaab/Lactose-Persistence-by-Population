@@ -25,7 +25,7 @@ library(caret)
 library(RColorBrewer)
 library(plotly)
 library(factoextra)
-
+library(genetics)
 
 #Read in VCF file ====
 # 
@@ -589,3 +589,50 @@ ggsave(file.path("../figures", "fig11_importance_Gini.png"), plot = p_mdg, width
 #top 10 SNPs by MDA
 print(top20_mda[1:10, c("SNP_label", "MeanDecreaseAccuracy", "MeanDecreaseGini")])
 cat("\nDone. All figures saved to ../figures/\n")
+
+# LD Structure Check ====
+#   Back-check whether top SNPs from RF and PCA form one haplotype block or
+# represent independent signals. High r2 between pairs means they are inherited
+# together and likely tag the same underlying variant.
+#Combine top 20 RF SNPs and top 10 PCA SNPs into one unique set
+#Use original names (before safe renaming) for both lists
+top_rf_original  <- top20_mda$SNP_label
+top_pca_original <- top_snps$SNP
+ld_snp_set       <- unique(c(top_rf_original, top_pca_original))
+cat("\nSNPs in LD analysis:", length(ld_snp_set), "\n")
+print(ld_snp_set)
+
+#Extract genotypes for this set from geno_final (before column renaming)
+ld_geno <- as.data.frame(geno_final[, ld_snp_set])
+
+#Convert 0/1/2 encoding to genotype objects for the genetics package
+#0 = homozygous reference (R/R), 1 = heterozygous (R/A), 2 = homozygous alt (A/A)
+encode_genotype <- function(x) {
+  ifelse(x == 0, "R/R", ifelse(x == 1, "R/A", "A/A"))
+}
+
+ld_genetics <- as.data.frame(
+  lapply(ld_geno, function(col) as.genotype(encode_genotype(col)))
+)
+#Calculate pairwise LD
+cat("Calculating pairwise LD...\n")
+ld_result <- LD(ld_genetics)
+
+#Extract r2 matrix
+r2_matrix <- ld_result$R^2
+
+#Print r2 matrix summary
+cat("\n=== LD ANALYSIS RESULTS ===\n")
+cat("Mean r2 among top SNPs:          ", round(mean(r2_matrix, na.rm = TRUE), 3), "\n")
+cat("Max r2:                          ", round(max(r2_matrix, na.rm = TRUE), 3), "\n")
+cat("Proportion of pairs with r2 > 0.8:", round(mean(r2_matrix > 0.8, na.rm = TRUE), 3), "\n")
+cat("Proportion of pairs with r2 > 0.5:", round(mean(r2_matrix > 0.5, na.rm = TRUE), 3), "\n")
+cat("\nFull r2 matrix:\n")
+print(round(r2_matrix, 3))
+
+#Short position labels for the heatmap axes
+short_labels <- sapply(ld_snp_set, function(snp) {
+  pos <- as.numeric(strsplit(snp, ":")[[1]][2])
+  paste0(round(pos / 1e6, 3), "Mb")
+})
+
