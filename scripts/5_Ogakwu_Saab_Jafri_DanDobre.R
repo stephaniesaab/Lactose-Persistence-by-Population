@@ -68,7 +68,7 @@ library(factoextra)
 
 #Previously downloaded and sliced the VCF. For convenience, 
 #Download the genotype CSV here: ====
-geno_final <- read.csv("../data/genotype_data.csv")
+geno_final <- read.csv(unz("../data/genotype_data.zip", "genotype_data.csv"))
 
 # EDA ====
 #Exploratory data analysis to identify which subpopulations to extract before doing clustering by genotypes
